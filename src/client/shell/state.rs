@@ -142,6 +142,7 @@ pub(super) enum ClientMobileTarget {
 pub(super) struct ShellHitMap {
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
+    pub(super) workspace_tabs: Vec<WorkspaceTabHit>,
     pub(super) workspace_body: Rect,
     pub(super) workspace_scrollbar: Rect,
     pub(super) workspace_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -289,6 +290,17 @@ pub(super) struct WorkspaceHit {
     pub(super) workspace_id: String,
     pub(super) indented: bool,
     pub(super) group_toggle: Option<(Rect, String)>,
+    /// Chevron that folds this workspace's tab rows, for workspaces that do not
+    /// already own a worktree group toggle.
+    pub(super) tab_toggle: Option<(Rect, String)>,
+}
+
+/// One tab row rendered under its workspace in the expanded Spaces sidebar.
+pub(super) struct WorkspaceTabHit {
+    pub(super) rect: Rect,
+    pub(super) endpoint_id: ClientEndpointId,
+    pub(super) workspace_id: String,
+    pub(super) tab_id: String,
 }
 
 #[derive(Debug)]
@@ -573,6 +585,7 @@ pub(super) enum ClientContextMenuAction {
     OpenWorktree,
     RemoveWorktree,
     ToggleGroup,
+    ToggleTabs,
     NewTab,
     RenamePane,
     ClearPaneName,
@@ -592,6 +605,8 @@ pub(super) enum ClientContextMenuTarget {
         is_linked_worktree: bool,
         has_worktree_children: bool,
         collapsed: bool,
+        has_tab_rows: bool,
+        tabs_collapsed: bool,
     },
     Tab {
         tab_id: String,
@@ -915,6 +930,8 @@ pub(crate) struct ClientShellState {
     pub(super) tab_press: Option<ClientTabPress>,
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
+    pub(super) collapsed_tab_workspaces: HashSet<String>,
+    pub(super) remote_collapsed_tab_workspaces: HashMap<ClientEndpointId, HashSet<String>>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
     pub(super) tab_scroll: usize,
@@ -1051,6 +1068,17 @@ impl ClientShellState {
                 .or_default()
                 .extend(saved.collapsed_groups);
         }
+        let mut remote_collapsed_tab_workspaces =
+            HashMap::<ClientEndpointId, HashSet<String>>::new();
+        for saved in preferences.remote_collapsed_tab_workspaces {
+            let Ok(profile_id) = crate::client::endpoint::ProfileId::parse(saved.profile_id) else {
+                continue;
+            };
+            remote_collapsed_tab_workspaces
+                .entry(ClientEndpointId::Ssh(profile_id))
+                .or_default()
+                .extend(saved.collapsed_tab_workspaces);
+        }
         Self {
             config,
             snapshot: None,
@@ -1075,6 +1103,8 @@ impl ClientShellState {
             tab_press: None,
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
+            collapsed_tab_workspaces: preferences.collapsed_tab_workspaces.into_iter().collect(),
+            remote_collapsed_tab_workspaces,
             workspace_scroll: 0,
             agent_scroll: 0,
             tab_scroll: 0,
@@ -1182,6 +1212,43 @@ impl ClientShellState {
     pub(super) fn group_is_collapsed(&self, endpoint_id: &ClientEndpointId, key: &str) -> bool {
         self.collapsed_groups_for_endpoint(endpoint_id)
             .is_some_and(|groups| groups.contains(key))
+    }
+
+    pub(super) fn collapsed_tab_workspaces_for_endpoint(
+        &self,
+        endpoint_id: &ClientEndpointId,
+    ) -> Option<&HashSet<String>> {
+        if endpoint_id.is_local() {
+            Some(&self.collapsed_tab_workspaces)
+        } else {
+            self.remote_collapsed_tab_workspaces.get(endpoint_id)
+        }
+    }
+
+    pub(super) fn workspace_tabs_are_collapsed(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        workspace_id: &str,
+    ) -> bool {
+        self.collapsed_tab_workspaces_for_endpoint(endpoint_id)
+            .is_some_and(|workspaces| workspaces.contains(workspace_id))
+    }
+
+    pub(super) fn toggle_collapsed_tab_workspace(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        workspace_id: String,
+    ) {
+        let workspaces = if endpoint_id.is_local() {
+            &mut self.collapsed_tab_workspaces
+        } else {
+            self.remote_collapsed_tab_workspaces
+                .entry(endpoint_id.clone())
+                .or_default()
+        };
+        if !workspaces.remove(&workspace_id) {
+            workspaces.insert(workspace_id);
+        }
     }
 
     pub(super) fn toggle_collapsed_group(&mut self, endpoint_id: &ClientEndpointId, key: String) {

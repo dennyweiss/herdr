@@ -91,6 +91,7 @@ pub(crate) fn render_collapsed_sidebar(
             workspace_id: workspace.workspace_id.clone(),
             indented: false,
             group_toggle: None,
+            tab_toggle: None,
         });
     }
 
@@ -223,21 +224,13 @@ pub(crate) fn render_sidebar(
     let row_heights = entries
         .iter()
         .map(|entry| {
-            snapshot
-                .workspaces
-                .get(entry.index)
-                .map(|workspace| {
-                    workspace_rows(
-                        workspace,
-                        displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
-                        entry.indented,
-                        &config.spaces,
-                    )
-                    .len()
-                    .max(1)
-                    .min(u16::MAX as usize) as u16
-                })
-                .unwrap_or(1)
+            workspace_entry_height(
+                snapshot,
+                entry,
+                config,
+                state.collapsed_groups,
+                state.collapsed_tab_workspaces,
+            )
         })
         .collect::<Vec<_>>();
     let gaps = entries
@@ -289,10 +282,19 @@ pub(crate) fn render_sidebar(
         };
         let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
         let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
-        let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
-        if y.saturating_add(row_height) > body.bottom() {
+        let tab_indices = workspace_tab_rows(
+            snapshot,
+            entry.index,
+            &config.spaces,
+            state.collapsed_tab_workspaces,
+        );
+        let entry_height = ((rows.len().max(1).saturating_add(tab_indices.len()))
+            .min(u16::MAX as usize) as u16)
+            .min(body.height);
+        if y.saturating_add(entry_height) > body.bottom() {
             break;
         }
+        let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(entry_height);
         let rect = Rect::new(body.x, y, content_width, row_height);
         let selected = state.selected_workspace_id.is_some_and(|target| {
             target.matches(state.active_endpoint_id, &workspace.workspace_id)
@@ -326,17 +328,54 @@ pub(crate) fn render_sidebar(
             state.collapsed_groups,
             palette,
         );
+        let tab_toggle = (group_toggle.is_none()
+            && workspace_has_tab_rows(snapshot, entry.index, &config.spaces))
+        .then(|| {
+            render_workspace_tab_toggle(
+                buffer,
+                rect,
+                &workspace.workspace_id,
+                tab_indices.is_empty(),
+                palette,
+            )
+        });
         hits.workspaces.push(WorkspaceHit {
             rect,
             endpoint_id: ClientEndpointId::Local,
             workspace_id: workspace.workspace_id.clone(),
             indented: entry.indented,
             group_toggle,
+            tab_toggle,
         });
+        hits.workspace_tabs.extend(
+            render_workspace_tab_rows(
+                buffer,
+                Rect::new(
+                    body.x,
+                    y.saturating_add(row_height),
+                    content_width,
+                    entry_height.saturating_sub(row_height),
+                ),
+                snapshot,
+                workspace,
+                entry,
+                &tab_indices,
+                config.status_indicators,
+                true,
+                palette,
+            )
+            .into_iter()
+            .map(|(rect, tab_id)| WorkspaceTabHit {
+                rect,
+                endpoint_id: ClientEndpointId::Local,
+                workspace_id: workspace.workspace_id.clone(),
+                tab_id,
+            }),
+        );
         let gap = entries
             .get(entry_position + 1)
             .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
-        y = y.saturating_add(row_height + gap);
+        y = y.saturating_add(entry_height + gap);
     }
 
     if show_scrollbar {
@@ -732,4 +771,220 @@ pub(in crate::client::shell) fn render_workspace_rows(
             }
         }
     }
+}
+
+fn workspace_tab_indices(snapshot: &ClientShellSnapshot, workspace_id: &str) -> Vec<usize> {
+    snapshot
+        .tabs
+        .iter()
+        .enumerate()
+        .filter(|(_, tab)| tab.workspace_id == workspace_id)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Whether a workspace is eligible for nested tab rows: opted in, and either
+/// holding more than one tab or at least one tab the user named.
+pub(in crate::client::shell) fn workspace_has_tab_rows(
+    snapshot: &ClientShellSnapshot,
+    workspace_index: usize,
+    config: &SpacesSidebarConfig,
+) -> bool {
+    if !config.show_tabs {
+        return false;
+    }
+    let Some(workspace) = snapshot.workspaces.get(workspace_index) else {
+        return false;
+    };
+    let tabs = workspace_tab_indices(snapshot, &workspace.workspace_id);
+    tabs.len() >= 2
+        || tabs
+            .iter()
+            .filter_map(|index| snapshot.tabs.get(*index))
+            .any(|tab| tab.custom_label)
+}
+
+/// Snapshot tab indices rendered under `workspace_index`, in snapshot order.
+/// Empty when tabs are hidden, folded, or not worth a row.
+pub(in crate::client::shell) fn workspace_tab_rows(
+    snapshot: &ClientShellSnapshot,
+    workspace_index: usize,
+    config: &SpacesSidebarConfig,
+    collapsed_tab_workspaces: &HashSet<String>,
+) -> Vec<usize> {
+    if !workspace_has_tab_rows(snapshot, workspace_index, config) {
+        return Vec::new();
+    }
+    let Some(workspace) = snapshot.workspaces.get(workspace_index) else {
+        return Vec::new();
+    };
+    if collapsed_tab_workspaces.contains(&workspace.workspace_id) {
+        return Vec::new();
+    }
+    workspace_tab_indices(snapshot, &workspace.workspace_id)
+}
+
+/// Token rows plus nested tab rows for one sidebar entry. Shared by rendering
+/// and by the scroll/height math so both stay consistent.
+pub(in crate::client::shell) fn workspace_entry_rows(
+    snapshot: &ClientShellSnapshot,
+    entry: &WorkspaceEntry,
+    config: &ClientShellConfig,
+    collapsed_groups: &HashSet<String>,
+    collapsed_tab_workspaces: &HashSet<String>,
+) -> (Vec<Vec<crate::ui::ResolvedToken>>, Vec<usize>) {
+    let Some(workspace) = snapshot.workspaces.get(entry.index) else {
+        return (Vec::new(), Vec::new());
+    };
+    let status = displayed_workspace_status(snapshot, workspace, collapsed_groups);
+    (
+        workspace_rows(workspace, status, entry.indented, &config.spaces),
+        workspace_tab_rows(
+            snapshot,
+            entry.index,
+            &config.spaces,
+            collapsed_tab_workspaces,
+        ),
+    )
+}
+
+pub(in crate::client::shell) fn workspace_entry_height(
+    snapshot: &ClientShellSnapshot,
+    entry: &WorkspaceEntry,
+    config: &ClientShellConfig,
+    collapsed_groups: &HashSet<String>,
+    collapsed_tab_workspaces: &HashSet<String>,
+) -> u16 {
+    let (rows, tabs) = workspace_entry_rows(
+        snapshot,
+        entry,
+        config,
+        collapsed_groups,
+        collapsed_tab_workspaces,
+    );
+    rows.len()
+        .max(1)
+        .saturating_add(tabs.len())
+        .min(u16::MAX as usize) as u16
+}
+
+pub(in crate::client::shell) fn render_workspace_tab_toggle(
+    buffer: &mut Buffer,
+    workspace_rect: Rect,
+    workspace_id: &str,
+    collapsed: bool,
+    palette: &Palette,
+) -> (Rect, String) {
+    let toggle = Rect::new(
+        workspace_rect.right().saturating_sub(1),
+        workspace_rect.y,
+        1,
+        1,
+    );
+    put_text(
+        buffer,
+        toggle.x,
+        toggle.y,
+        toggle.width,
+        if collapsed { "▸" } else { "▾" },
+        Style::default().fg(palette.accent),
+    );
+    (toggle, workspace_id.to_owned())
+}
+
+/// Draws the tab rows nested under a workspace entry and returns one
+/// `(rect, tab_id)` pair per rendered row, in snapshot order.
+#[allow(clippy::too_many_arguments)] // Mirrors render_workspace_rows: pure drawing inputs.
+pub(in crate::client::shell) fn render_workspace_tab_rows(
+    buffer: &mut Buffer,
+    area: Rect,
+    snapshot: &ClientShellSnapshot,
+    workspace: &ClientShellWorkspace,
+    entry: &WorkspaceEntry,
+    tab_indices: &[usize],
+    indicators: crate::config::StatusIndicatorStyle,
+    endpoint_active: bool,
+    palette: &Palette,
+) -> Vec<(Rect, String)> {
+    let mut hits = Vec::new();
+    for (position, tab_index) in tab_indices.iter().enumerate() {
+        let y = area
+            .y
+            .saturating_add(position.min(u16::MAX as usize) as u16);
+        if y >= area.bottom() {
+            break;
+        }
+        let Some(tab) = snapshot.tabs.get(*tab_index) else {
+            continue;
+        };
+        let rect = Rect::new(area.x, y, area.width, 1);
+        let active = tab.focused && workspace.focused && endpoint_active;
+        let tree = Style::default().fg(palette.overlay0);
+        let mut x = area.x;
+        if entry.indented {
+            x = put_segment(
+                buffer,
+                x,
+                y,
+                area.right(),
+                if entry.last_child {
+                    "      "
+                } else {
+                    "   │  "
+                },
+                tree,
+            );
+        } else {
+            x = put_segment(buffer, x, y, area.right(), "   ", tree);
+        }
+        x = put_segment(
+            buffer,
+            x,
+            y,
+            area.right(),
+            if position + 1 == tab_indices.len() {
+                "└─ "
+            } else {
+                "├─ "
+            },
+            tree,
+        );
+        let right = area.right().saturating_sub(2);
+        x = put_segment(
+            buffer,
+            x,
+            y,
+            right,
+            status_icon(tab.agent_status, indicators),
+            Style::default().fg(status_color(tab.agent_status, palette)),
+        );
+        x = put_segment(buffer, x, y, right, " ", tree);
+        let width = right.saturating_sub(x);
+        let label = if tab.zoomed {
+            format!("{} Z", tab.label)
+        } else {
+            tab.label.clone()
+        };
+        put_text(
+            buffer,
+            x,
+            y,
+            width,
+            &crate::ui::truncate_end(&label, width as usize),
+            if active {
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.subtext0)
+            },
+        );
+        if active {
+            for x in rect.x..rect.right() {
+                buffer[(x, y)].set_bg(palette.active_row_bg);
+            }
+        }
+        hits.push((rect, tab.tab_id.clone()));
+    }
+    hits
 }
