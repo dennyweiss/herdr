@@ -6,41 +6,54 @@ impl ClientContextMenuOverlay {
 
         let item = |label, action| ClientContextMenuItem { label, action };
         match &self.target {
-            ClientContextMenuTarget::Workspace { is_git: false, .. } => {
-                vec![item("Rename", Action::Rename), item("Close", Action::Close)]
-            }
             ClientContextMenuTarget::Workspace {
-                is_linked_worktree: false,
-                has_worktree_children: false,
-                ..
-            } => vec![
-                item("Rename", Action::Rename),
-                item("Close", Action::Close),
-                item("New worktree", Action::NewWorktree),
-                item("Open worktree...", Action::OpenWorktree),
-            ],
-            ClientContextMenuTarget::Workspace {
-                is_linked_worktree: true,
-                ..
-            } => vec![
-                item("Rename", Action::Rename),
-                item("Close", Action::Close),
-                item("Delete worktree checkout...", Action::RemoveWorktree),
-            ],
-            ClientContextMenuTarget::Workspace {
-                has_worktree_children: true,
+                is_git,
+                is_linked_worktree,
+                has_worktree_children,
                 collapsed,
+                has_tab_rows,
+                tabs_collapsed,
                 ..
-            } => vec![
-                item("Rename", Action::Rename),
-                item("Close group", Action::Close),
-                item("New worktree", Action::NewWorktree),
-                item("Open worktree...", Action::OpenWorktree),
-                item(
-                    if *collapsed { "Expand" } else { "Collapse" },
-                    Action::ToggleGroup,
-                ),
-            ],
+            } => {
+                let mut items = if !*is_git {
+                    vec![item("Rename", Action::Rename), item("Close", Action::Close)]
+                } else if *is_linked_worktree {
+                    vec![
+                        item("Rename", Action::Rename),
+                        item("Close", Action::Close),
+                        item("Delete worktree checkout...", Action::RemoveWorktree),
+                    ]
+                } else if *has_worktree_children {
+                    vec![
+                        item("Rename", Action::Rename),
+                        item("Close group", Action::Close),
+                        item("New worktree", Action::NewWorktree),
+                        item("Open worktree...", Action::OpenWorktree),
+                        item(
+                            if *collapsed { "Expand" } else { "Collapse" },
+                            Action::ToggleGroup,
+                        ),
+                    ]
+                } else {
+                    vec![
+                        item("Rename", Action::Rename),
+                        item("Close", Action::Close),
+                        item("New worktree", Action::NewWorktree),
+                        item("Open worktree...", Action::OpenWorktree),
+                    ]
+                };
+                if *has_tab_rows {
+                    items.push(item(
+                        if *tabs_collapsed {
+                            "Show tabs"
+                        } else {
+                            "Hide tabs"
+                        },
+                        Action::ToggleTabs,
+                    ));
+                }
+                items
+            }
             ClientContextMenuTarget::Tab { .. } => vec![
                 item("New tab", Action::NewTab),
                 item("Rename", Action::Rename),
@@ -108,6 +121,14 @@ impl ClientShellState {
         });
         let collapsed =
             worktree.is_some_and(|worktree| self.collapsed_groups.contains(&worktree.key));
+        let has_tab_rows = snapshot
+            .workspaces
+            .iter()
+            .position(|candidate| candidate.workspace_id == workspace_id)
+            .is_some_and(|index| {
+                render::sidebar::workspace_has_tab_rows(snapshot, index, &self.config.spaces)
+            });
+        let tabs_collapsed = self.workspace_tabs_are_collapsed(&workspace_id);
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Workspace {
                 workspace_id,
@@ -115,6 +136,8 @@ impl ClientShellState {
                 is_linked_worktree: worktree.is_some_and(|worktree| worktree.is_linked_worktree),
                 has_worktree_children,
                 collapsed,
+                has_tab_rows,
+                tabs_collapsed,
             },
             x,
             y,
@@ -268,6 +291,10 @@ impl ClientShellState {
             }
             ClientContextMenuAction::RemoveWorktree => {
                 self.begin_worktree_action_for(KeybindAction::RemoveWorktree, workspace_id, outcome)
+            }
+            ClientContextMenuAction::ToggleTabs => {
+                self.toggle_collapsed_tab_workspace(workspace_id);
+                self.persist_chrome_preferences(outcome);
             }
             ClientContextMenuAction::ToggleGroup => {
                 let key = self.snapshot.as_deref().and_then(|snapshot| {

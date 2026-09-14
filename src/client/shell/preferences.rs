@@ -19,6 +19,8 @@ pub(super) struct ClientChromePreferences {
     pub(super) agent_panel_sort: Option<crate::config::AgentPanelSortConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) collapsed_groups: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) collapsed_tab_workspaces: Vec<String>,
 }
 
 pub(super) fn path_for_local_endpoint(socket_path: &Path) -> PathBuf {
@@ -71,6 +73,16 @@ mod tests {
         let second = path_for_local_endpoint(Path::new("/run/herdr/two.sock"));
         assert_eq!(first, again);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn legacy_preferences_default_tab_collapses() {
+        let preferences: ClientChromePreferences =
+            serde_json::from_str(r#"{"collapsed_groups":["/repo"]}"#)
+                .expect("legacy client chrome preferences");
+
+        assert_eq!(preferences.collapsed_groups, ["/repo"]);
+        assert!(preferences.collapsed_tab_workspaces.is_empty());
     }
 
     #[test]

@@ -501,7 +501,18 @@ impl ClientShellState {
                     .get(entry.index)
                     .map(|workspace| workspace.workspace_id.clone())
             });
-            let row = last_hit.rect.bottom();
+            // Tab rows extend the entry below its workspace rect.
+            let row = self
+                .hits
+                .workspace_tabs
+                .iter()
+                .filter(|hit| {
+                    hit.endpoint_id == last_hit.endpoint_id
+                        && hit.workspace_id == last_hit.workspace_id
+                })
+                .map(|hit| hit.rect.bottom())
+                .max()
+                .unwrap_or_else(|| last_hit.rect.bottom());
             if row < self.hits.new_workspace.y {
                 slots.push((before, row));
             }
@@ -1718,6 +1729,23 @@ impl ClientShellState {
                 if !self.config.mouse_capture {
                     return;
                 }
+                let workspace_tab_id = (!self.sidebar_collapsed)
+                    .then(|| {
+                        self.hits
+                            .workspace_tabs
+                            .iter()
+                            .find(|hit| {
+                                hit.endpoint_id == self.active_endpoint_id
+                                    && super::contains(hit.rect, point)
+                            })
+                            .map(|hit| hit.tab_id.clone())
+                    })
+                    .flatten();
+                if let Some(tab_id) = workspace_tab_id {
+                    self.open_tab_context_menu(tab_id, mouse.column, mouse.row);
+                    outcome.repaint = true;
+                    return;
+                }
                 let workspace_id = (!self.sidebar_collapsed)
                     .then(|| self.active_endpoint_workspace_at(point))
                     .flatten();
@@ -1983,6 +2011,32 @@ impl ClientShellState {
                             return;
                         }
                     }
+                }
+                let tab_toggle = self.hits.workspaces.iter().find_map(|hit| {
+                    let (rect, workspace_id) = hit.tab_toggle.as_ref()?;
+                    super::contains(*rect, point).then(|| workspace_id.clone())
+                });
+                if let Some(workspace_id) = tab_toggle {
+                    self.toggle_collapsed_tab_workspace(workspace_id);
+                    outcome.repaint = true;
+                    self.persist_chrome_preferences(outcome);
+                    return;
+                }
+                // Tab rows sit inside the workspace body but must never start a
+                // workspace drag, so they are resolved before the workspace hit.
+                let workspace_tab = self
+                    .hits
+                    .workspace_tabs
+                    .iter()
+                    .find(|hit| super::contains(hit.rect, point))
+                    .map(|hit| (hit.endpoint_id.clone(), hit.tab_id.clone()));
+                if let Some((endpoint_id, tab_id)) = workspace_tab {
+                    self.focus_or_activate(
+                        endpoint_id,
+                        ClientEndpointFocusTarget::Tab(tab_id),
+                        outcome,
+                    );
+                    return;
                 }
                 let workspace_press = self
                     .hits

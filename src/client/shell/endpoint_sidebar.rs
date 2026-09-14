@@ -1,6 +1,17 @@
 use super::render::{display_width, put_right_text, put_text, ShellRenderState};
 use super::*;
 
+/// Folded tab lists are client-local and only tracked for the Local endpoint,
+/// so remote machines list their tab rows without a fold chevron.
+fn collapsed_tab_workspaces_for_endpoint<'a>(
+    state: &'a ShellRenderState<'_>,
+    endpoint_id: &ClientEndpointId,
+) -> Option<&'a HashSet<String>> {
+    endpoint_id
+        .is_local()
+        .then_some(state.collapsed_tab_workspaces)
+}
+
 pub(super) fn render_collapsed(
     buffer: &mut Buffer,
     area: Rect,
@@ -106,6 +117,7 @@ pub(super) fn render_collapsed(
                 workspace_id: workspace.workspace_id.clone(),
                 indented: false,
                 group_toggle: None,
+                tab_toggle: None,
             });
             y = y.saturating_add(1);
         }
@@ -211,26 +223,33 @@ pub(super) fn render_expanded(
             .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
     );
     hits.workspace_body = body;
+    // The expanded machine list has no worktree group folding, so entry heights
+    // are measured against an empty collapsed-group set.
+    let no_collapsed_groups = HashSet::new();
+    let no_collapsed_tab_workspaces = HashSet::new();
     let row_heights = rows
         .iter()
         .map(|row| match row {
             Row::Endpoint(_) => 1,
-            Row::Workspace { endpoint, entry } => state.endpoints[*endpoint]
-                .snapshot
-                .as_deref()
-                .and_then(|snapshot| snapshot.workspaces.get(entry.index))
-                .map(|workspace| {
-                    super::sidebar::workspace_rows(
-                        workspace,
-                        workspace.agent_status,
-                        entry.indented,
-                        &config.spaces,
-                    )
-                    .len()
-                    .max(1)
-                    .min(u16::MAX as usize) as u16
-                })
-                .unwrap_or(1),
+            Row::Workspace { endpoint, entry } => {
+                let endpoint = &state.endpoints[*endpoint];
+                let collapsed_tab_workspaces =
+                    collapsed_tab_workspaces_for_endpoint(state, &endpoint.endpoint_id)
+                        .unwrap_or(&no_collapsed_tab_workspaces);
+                endpoint
+                    .snapshot
+                    .as_deref()
+                    .map(|snapshot| {
+                        super::sidebar::workspace_entry_height(
+                            snapshot,
+                            entry,
+                            config,
+                            &no_collapsed_groups,
+                            collapsed_tab_workspaces,
+                        )
+                    })
+                    .unwrap_or(1)
+            }
         })
         .collect::<Vec<_>>();
     let gaps = vec![0; rows.len()];
@@ -280,16 +299,27 @@ pub(super) fn render_expanded(
                 let Some(workspace) = snapshot.workspaces.get(entry.index) else {
                     continue;
                 };
+                let collapsed_tab_workspaces =
+                    collapsed_tab_workspaces_for_endpoint(state, &endpoint.endpoint_id);
                 let tokens = super::sidebar::workspace_rows(
                     workspace,
                     workspace.agent_status,
                     entry.indented,
                     &config.spaces,
                 );
-                let height = (tokens.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
-                if y.saturating_add(height) > body.bottom() {
+                let tab_indices = super::sidebar::workspace_tab_rows(
+                    snapshot,
+                    entry.index,
+                    &config.spaces,
+                    collapsed_tab_workspaces.unwrap_or(&no_collapsed_tab_workspaces),
+                );
+                let entry_height = ((tokens.len().max(1).saturating_add(tab_indices.len()))
+                    .min(u16::MAX as usize) as u16)
+                    .min(body.height);
+                if y.saturating_add(entry_height) > body.bottom() {
                     break;
                 }
+                let height = (tokens.len().max(1).min(u16::MAX as usize) as u16).min(entry_height);
                 let rect = Rect::new(body.x, y, content_width, height);
                 let nested = Rect::new(
                     rect.x.saturating_add(2),
@@ -319,14 +349,55 @@ pub(super) fn render_expanded(
                             .add_modifier(Modifier::DIM),
                     );
                 }
+                let tab_toggle = (collapsed_tab_workspaces.is_some()
+                    && super::sidebar::workspace_has_tab_rows(
+                        snapshot,
+                        entry.index,
+                        &config.spaces,
+                    ))
+                .then(|| {
+                    super::sidebar::render_workspace_tab_toggle(
+                        buffer,
+                        rect,
+                        &workspace.workspace_id,
+                        tab_indices.is_empty(),
+                        palette,
+                    )
+                });
                 hits.workspaces.push(WorkspaceHit {
                     rect,
                     endpoint_id: endpoint.endpoint_id.clone(),
                     workspace_id: workspace.workspace_id.clone(),
                     indented: entry.indented,
                     group_toggle: None,
+                    tab_toggle,
                 });
-                y = y.saturating_add(height);
+                hits.workspace_tabs.extend(
+                    super::sidebar::render_workspace_tab_rows(
+                        buffer,
+                        Rect::new(
+                            nested.x,
+                            y.saturating_add(height),
+                            nested.width,
+                            entry_height.saturating_sub(height),
+                        ),
+                        snapshot,
+                        workspace,
+                        entry,
+                        &tab_indices,
+                        config.status_indicators,
+                        endpoint_active,
+                        palette,
+                    )
+                    .into_iter()
+                    .map(|(rect, tab_id)| WorkspaceTabHit {
+                        rect,
+                        endpoint_id: endpoint.endpoint_id.clone(),
+                        workspace_id: workspace.workspace_id.clone(),
+                        tab_id,
+                    }),
+                );
+                y = y.saturating_add(entry_height);
             }
         }
     }
