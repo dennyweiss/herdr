@@ -358,6 +358,7 @@ rows = [
 
 [ui.sidebar.spaces]
 row_gap = 0
+show_tabs = false
 rows = [
   ["state_icon", "workspace"],
   ["branch", "git_status"],
@@ -420,6 +421,8 @@ rows = [
 规则适用于 Agent 行、`rows_by_agent` 覆盖和 Space 行中的文本值内置 token 及自定义 `$name` token。上例中，`$load` 报告 `"90"` 时显示红色粗体，`"60"` 时显示黄色，`"90%"` 时保持白色。未报告的 token 仍然不显示。`state_icon` 和复合 token `git_status` 仅接受固定样式，不支持规则。未知条件或格式错误的规则会在加载配置时被拒绝；不支持正则表达式、模糊匹配或脚本。
 
 `row_gap` 分别控制 Agent 和 Space 面板中条目之间的空白终端行数。默认值为 `0`，会紧密排列条目；设为 `1` 可恢复之前的间距。它不会在 `rows` 声明的内容行之间添加间距。连续缩进的 worktree 子项仍会作为一个 Space 组紧密排列。
+
+`show_tabs` 会将每个 Space 的标签页作为缩进行列在 Space 条目下方，使用与 worktree 子项相同的 `├─` 树形样式。当 Space 有多个标签页或有自定义名称的标签页时才会显示。每个标签页行显示该标签页的聚合代理状态和标签。点击标签页即可聚焦，需要时侧边栏会切换 Space。右键打开标签页菜单。Space 行末尾的折叠符号或 Space 上下文菜单可以折叠该 Space 的标签页列表；折叠状态按客户端记忆。默认值为 `false`。
 
 在 `rows_by_agent` 下为已知智能体覆盖完整的 Agent 布局：
 
