@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# herdr-tabs: build and run the "tabs in sidebar" branch of Herdr in parallel
+# with the installed stable Herdr. The test instance gets its own config file,
+# server socket, sessions, and client preferences under ~/.herdr-tabs, so the
+# stable install is never touched.
+#
+# Usage:
+#   herdr-tabs build          fetch the branch and build a release binary
+#   herdr-tabs run [args]     start the test UI (or pass CLI args through)
+#   herdr-tabs cli <args>     run any herdr CLI command against the test server
+#   herdr-tabs stop           stop the test server (ends its pane processes)
+#   herdr-tabs status         show test server status
+#   herdr-tabs config         open the test instance config in $EDITOR
+#   herdr-tabs clean          stop the server and delete ~/.herdr-tabs
+#
+# Environment:
+#   HERDR_TABS_REPO   path to the herdr checkout (default: ~/src/herdr)
+#   HERDR_TABS_HOME   private data root (default: ~/.herdr-tabs)
+#   HERDR_TABS_BRANCH branch to build (default: claude/herdr-tabs-v0.9.0, the v0.9.0 release plus the feature)
+
+set -euo pipefail
+
+REPO="${HERDR_TABS_REPO:-$HOME/src/herdr}"
+ROOT="${HERDR_TABS_HOME:-$HOME/.herdr-tabs}"
+BRANCH="${HERDR_TABS_BRANCH:-claude/herdr-tabs-v0.9.0}"
+REMOTE_URL="https://github.com/dennyweiss/herdr.git"
+
+CONFIG_HOME="$ROOT/config"
+STATE_HOME="$ROOT/state"
+CONFIG_FILE="$CONFIG_HOME/herdr/config.toml"
+BIN="$REPO/target/release/herdr"
+
+die() { echo "herdr-tabs: $*" >&2; exit 1; }
+
+ensure_config() {
+    mkdir -p "$CONFIG_HOME/herdr" "$STATE_HOME"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" <<'TOML'
+# Config for the herdr-tabs test instance. Independent from ~/.config/herdr.
+
+[ui.sidebar.spaces]
+show_tabs = true
+
+[experimental]
+# Lets the test UI start from a terminal that lives inside stable Herdr.
+allow_nested = true
+TOML
+        echo "herdr-tabs: created $CONFIG_FILE"
+    fi
+}
+
+# Run the test binary with all plumbing applied: private XDG dirs and no
+# inherited socket variables from a surrounding stable Herdr session.
+run_herdr() {
+    [ -x "$BIN" ] || die "no binary at $BIN, run 'herdr-tabs build' first"
+    ensure_config
+    XDG_CONFIG_HOME="$CONFIG_HOME" XDG_STATE_HOME="$STATE_HOME" \
+        exec env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_ENV \
+        "$BIN" "$@"
+}
+
+cmd_build() {
+    command -v cargo >/dev/null || die "cargo not found; install Rust first"
+    command -v "${ZIG:-zig}" >/dev/null || die "zig not found; the v0.9.0 branch needs Zig 0.15.2 (https://ziglang.org/download/), or set ZIG to its path"
+    if [ ! -d "$REPO/.git" ]; then
+        echo "herdr-tabs: cloning $REMOTE_URL into $REPO"
+        git clone "$REMOTE_URL" "$REPO"
+    fi
+    git -C "$REPO" fetch origin "$BRANCH"
+    git -C "$REPO" checkout -q "$BRANCH"
+    git -C "$REPO" pull -q --ff-only origin "$BRANCH"
+    (cd "$REPO" && cargo build --release --locked)
+    echo "herdr-tabs: built $BIN"
+}
+
+case "${1:-}" in
+    build)  cmd_build ;;
+    run)    shift; run_herdr "$@" ;;
+    cli)    shift; [ $# -gt 0 ] || die "cli needs a herdr command, e.g. 'cli tab create --label \"#482 oauth\"'"; run_herdr "$@" ;;
+    stop)   run_herdr server stop ;;
+    status) run_herdr status ;;
+    config) ensure_config; "${EDITOR:-vi}" "$CONFIG_FILE" ;;
+    clean)
+        if [ -x "$BIN" ]; then
+            XDG_CONFIG_HOME="$CONFIG_HOME" XDG_STATE_HOME="$STATE_HOME" \
+                env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_ENV \
+                "$BIN" server stop || true
+        fi
+        rm -rf "$ROOT"
+        echo "herdr-tabs: removed $ROOT"
+        ;;
+    *)      sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac
