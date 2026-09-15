@@ -8,13 +8,18 @@ install is never touched.
 ## Prerequisites
 
 - Rust toolchain via [rustup](https://rustup.rs).
-- Zig 0.16.0 on your PATH. Check with `zig version`. On macOS,
-  `brew install zig` works when Homebrew ships that exact version. Otherwise
-  download 0.16.0 from https://ziglang.org/download/ and either add it to
-  your PATH or set `ZIG=/path/to/zig` before building.
+- Zig on your PATH, or `ZIG=/path/to/zig` exported before building. The
+  default branch is the v0.9.0 release plus the feature and needs Zig 0.15.2.
+  A branch based on current master needs Zig 0.16.0. Check with `zig version`.
+  On macOS, `brew install zig` works when Homebrew ships the exact version.
+  Otherwise download it from https://ziglang.org/download/.
 - A checkout of this repository. The script defaults to `~/src/herdr` and
   clones the fork there when the directory does not exist. Set
   `HERDR_TABS_REPO` to use another location.
+- The script builds `claude/herdr-tabs-v0.9.0` by default: the released
+  v0.9.0 code plus the sidebar tabs feature, so the test build differs from
+  stable Herdr only by this feature. Set `HERDR_TABS_BRANCH` to build the
+  master-based branch instead.
 
 ## Install the script
 
